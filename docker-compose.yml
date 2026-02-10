@@ -1,0 +1,46 @@
+version: "3.8"
+
+services:
+  finance-pro-api:
+    build:
+      context: ./finance-pro-backend
+      dockerfile: Dockerfile
+    ports:
+      - "5100:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=FinanceProDb;User Id=sa;Password=FinancePro_Str0ng!;TrustServerCertificate=True;MultipleActiveResultSets=true
+      - Jwt__Key=FinancePro-Super-Secret-Key-Must-Be-At-Least-32-Characters-Long!
+      - Jwt__Issuer=FinancePro
+      - Jwt__Audience=FinancePro
+      - Cors__Origins=http://localhost:5173
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+
+  finance-pro-frontend:
+    build:
+      context: ./finance-pro-frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:80"
+    depends_on:
+      - finance-pro-api
+
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=FinancePro_Str0ng!
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+    healthcheck:
+      test: /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "FinancePro_Str0ng!" -C -Q "SELECT 1" || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  sqlserver-data:
