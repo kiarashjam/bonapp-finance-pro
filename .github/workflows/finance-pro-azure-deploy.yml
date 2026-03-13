@@ -1,0 +1,129 @@
+name: Finance Pro Azure Deploy
+
+on:
+  push:
+    paths:
+      - "finance-pro-backend/**"
+      - "finance-pro-frontend/**"
+      - ".github/workflows/finance-pro-azure-deploy.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: finance-pro-azure-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      API_PROJECT_PATH: finance-pro-backend/src/FinancePro.Api/FinancePro.Api.csproj
+      API_PUBLISH_PATH: finance-pro-backend/publish
+      API_ZIP_PATH: finance-pro-backend/financepro-api.zip
+      FRONTEND_PATH: finance-pro-frontend
+      FRONTEND_DIST_PATH: finance-pro-frontend/dist
+      AZURE_WEBAPP_RESOURCE_GROUP: rg-bonapp-inventory-dev-weu
+      AZURE_WEBAPP_NAME: bonappfp-api-ec4c663e
+      AZURE_STORAGE_RESOURCE_GROUP: rg-bonapp-financepro-cheap
+      AZURE_STORAGE_ACCOUNT_NAME: stbonappfpec4c663e
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Select Azure subscription
+        run: az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Publish backend API
+        run: dotnet publish "${{ env.API_PROJECT_PATH }}" -c Release -o "${{ env.API_PUBLISH_PATH }}" /p:UseAppHost=false
+
+      - name: Package backend API
+        run: |
+          rm -f "${{ env.API_ZIP_PATH }}"
+          cd "${{ env.API_PUBLISH_PATH }}"
+          zip -r "../financepro-api.zip" .
+
+      - name: Deploy backend to Azure Web App
+        run: |
+          az webapp deploy \
+            --resource-group "${{ env.AZURE_WEBAPP_RESOURCE_GROUP }}" \
+            --name "${{ env.AZURE_WEBAPP_NAME }}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            --src-path "${{ env.API_ZIP_PATH }}" \
+            --type zip \
+            --clean true
+
+      - name: Configure backend app settings
+        run: |
+          FRONTEND_ORIGIN="$(az storage account show \
+            --name "${{ env.AZURE_STORAGE_ACCOUNT_NAME }}" \
+            --resource-group "${{ env.AZURE_STORAGE_RESOURCE_GROUP }}" \
+            --query "primaryEndpoints.web" -o tsv | sed 's:/*$::')"
+
+          az webapp config appsettings set \
+            --resource-group "${{ env.AZURE_WEBAPP_RESOURCE_GROUP }}" \
+            --name "${{ env.AZURE_WEBAPP_NAME }}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            --settings \
+              ASPNETCORE_ENVIRONMENT=Production \
+              Cors__Origins="$FRONTEND_ORIGIN"
+
+          if [ -n "${{ secrets.AZURE_FINANCEPRO_CONNECTION_STRING }}" ]; then
+            az webapp config appsettings set \
+              --resource-group "${{ env.AZURE_WEBAPP_RESOURCE_GROUP }}" \
+              --name "${{ env.AZURE_WEBAPP_NAME }}" \
+              --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+              --settings "ConnectionStrings__DefaultConnection=${{ secrets.AZURE_FINANCEPRO_CONNECTION_STRING }}"
+          fi
+
+          if [ -n "${{ secrets.AZURE_FINANCEPRO_JWT_KEY }}" ]; then
+            az webapp config appsettings set \
+              --resource-group "${{ env.AZURE_WEBAPP_RESOURCE_GROUP }}" \
+              --name "${{ env.AZURE_WEBAPP_NAME }}" \
+              --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+              --settings "Jwt__Key=${{ secrets.AZURE_FINANCEPRO_JWT_KEY }}"
+          fi
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install frontend dependencies
+        working-directory: ${{ env.FRONTEND_PATH }}
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: ${{ env.FRONTEND_PATH }}
+        env:
+          VITE_API_URL: https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net
+        run: npm run build
+
+      - name: Upload frontend to Azure static website
+        run: |
+          az storage blob upload-batch \
+            --account-name "${{ env.AZURE_STORAGE_ACCOUNT_NAME }}" \
+            --account-key "${{ secrets.AZURE_FINANCEPRO_STORAGE_ACCOUNT_KEY }}" \
+            --destination '$web' \
+            --source "${{ env.FRONTEND_DIST_PATH }}" \
+            --overwrite true
+
+      - name: Smoke test backend endpoint
+        run: |
+          STATUS="$(curl -s -o /dev/null -w "%{http_code}" "https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net/api/auth/me")"
+          if [ "$STATUS" != "401" ]; then
+            echo "Unexpected backend status: $STATUS"
+            exit 1
+          fi
