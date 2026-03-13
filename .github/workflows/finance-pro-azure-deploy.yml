@@ -33,6 +33,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Validate required secrets
+        run: |
+          MISSING=0
+          check_secret() {
+            local secret_name="$1"
+            local secret_value="$2"
+            if [ -z "$secret_value" ]; then
+              echo "::error::Missing required repository secret: $secret_name"
+              MISSING=1
+            fi
+          }
+
+          check_secret "AZURE_CREDENTIALS" "${{ secrets.AZURE_CREDENTIALS }}"
+          check_secret "AZURE_SUBSCRIPTION_ID" "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+          check_secret "AZURE_FINANCEPRO_STORAGE_ACCOUNT_KEY" "${{ secrets.AZURE_FINANCEPRO_STORAGE_ACCOUNT_KEY }}"
+
+          if [ "$MISSING" -eq 1 ]; then
+            echo "::error::Set the missing secrets in repo settings: Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
       - name: Azure login
         uses: azure/login@v2
         with:
